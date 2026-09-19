@@ -39,6 +39,10 @@ public sealed class TerrainScene
 
     private readonly List<Level> _levels = [];      // coarsest first
     private readonly Dictionary<string, (byte[] A, byte[] B, byte[] Blend)> _materials = [];
+
+    /// <summary>The tile the last material sample came from, and its grids. See SampleMaterial.</summary>
+    private string? _lastMateName;
+    private (byte[] A, byte[] B, byte[] Blend)? _lastMate;
     private readonly Dictionary<string, ushort[]> _heights = [];
 
     // Archives already opened. A tile listed in the scene file is not always inside the
@@ -339,10 +343,26 @@ public sealed class TerrainScene
         {
             if (!TryTileAt(level, x, z, out Tile tile)) continue;
 
-            string key = KeyOf(tile.Name);
-            if (!_materials.TryGetValue(key, out var m))
+            // Neighbouring samples land in the same tile almost every time, and the lookup
+            // below cuts a fresh key string out of the tile's name and hashes it for each
+            // one - which, over a material map of some sixteen million texels, is most of
+            // what building it costs. The tile names come from the level tables and are the
+            // same instances every time, so a reference check settles it.
+            (byte[] A, byte[] B, byte[] Blend) m;
+            if (ReferenceEquals(tile.Name, _lastMateName) && _lastMate is { } memo)
             {
-                if (!Load(tile.Name, "mate") || !_materials.TryGetValue(key, out m)) continue;
+                m = memo;
+            }
+            else
+            {
+                string key = KeyOf(tile.Name);
+                if (!_materials.TryGetValue(key, out m))
+                {
+                    if (!Load(tile.Name, "mate") || !_materials.TryGetValue(key, out m)) continue;
+                }
+
+                _lastMateName = tile.Name;
+                _lastMate = m;
             }
 
             int o = TexelOf(tile, x, z);
