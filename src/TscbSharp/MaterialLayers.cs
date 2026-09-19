@@ -1,17 +1,7 @@
 namespace TscbSharp;
 
-/// <summary>
-/// Maps a material archive's stored index onto the layer of the shared material texture array.
-/// </summary>
-/// <remarks>
-/// The mapping is the identity only as far as index 28; past that it shifts, and several
-/// indices share a layer - 29 and 30 fall back onto 17 and 18, and 31, 76 and 125 all land on
-/// something already used. Reading a stored index as a layer directly gives the wrong material
-/// for most of the table.
-/// </remarks>
 public static class MaterialLayers
 {
-    /// <summary>The layer meaning "no material here"; the archives use it as a hole marker.</summary>
     public const byte None = 120;
 
     public static readonly byte[] IndexToLayer =
@@ -25,8 +15,6 @@ public static class MaterialLayers
         109,110,111,112,113,114,115,116,117,118,119,120
     ];
 
-    /// <summary>The index a layer came from, inverting <see cref="IndexToLayer"/>.</summary>
-    /// <remarks>Several indices share a layer, so the last one wins - as it does in the game's own lookup.</remarks>
     public static readonly byte[] LayerToIndex = BuildLayerToIndex();
 
     private static byte[] BuildLayerToIndex()

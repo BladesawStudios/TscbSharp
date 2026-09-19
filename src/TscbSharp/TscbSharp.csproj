@@ -6,7 +6,8 @@
     <Nullable>enable</Nullable>
     <RootNamespace>TscbSharp</RootNamespace>
     <AssemblyName>TscbSharp</AssemblyName>
-    <Version>0.1.0</Version>
+    <Version>1.0.0</Version>
+    <Authors>Aiden A</Authors>
     <Description>Reader for the Tears of the Kingdom terrain scene (.tscb) and its height and material archives.</Description>
     <PackageLicenseExpression>AGPL-3.0-or-later</PackageLicenseExpression>
   </PropertyGroup>
