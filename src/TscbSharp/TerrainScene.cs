@@ -285,38 +285,114 @@ public sealed class TerrainScene
     }
 
     /// <summary>
-    /// <paramref name="tile"/>'s own water grid, or an ancestor's resampled onto its footprint.
+    /// <paramref name="tile"/>'s water grid, with anything it does not describe itself filled
+    /// in from its ancestors.
     /// </summary>
-    public byte[]? WaterGridFor(Tile tile)
+
+    public byte[]? WaterGridFor(Tile tile) => WaterGridFor(tile, null);
+
+    /// <param name="heights">Unused; kept so callers that have them need not drop them.</param>
+    public byte[]? WaterGridFor(Tile tile, ushort[]? heights)
     {
-        if (WaterOf(tile) is { } own) return own;
+        byte[]? own = WaterOf(tile);
+        int start = LevelOf(tile) - (own is null ? 0 : 1);
 
+        byte[]? into = null;
         float cx = tile.MinX + tile.Size * 0.5f, cz = tile.MinZ + tile.Size * 0.5f;
-        if (WaterSourceAt(LevelOf(tile), cx, cz) is not Tile src) return null;
-        if (WaterOf(src) is not { } from) return null;
 
-        byte[] into = new byte[WaterBytes];
+        for (int l = Math.Min(start, _levels.Count - 1); l >= 0; l--)
+        {
+            if (!TryTileAt(l, cx, cz, out Tile src)) continue;
+            if (WaterOf(src) is not { } from) continue;
+
+            into ??= own is null ? new byte[WaterBytes] : (byte[])own.Clone();
+            if (Fill(into, tile, from, src)) break;
+        }
+
+        return into ?? own;
+    }
+
+    /// <summary>
+    /// Copies <paramref name="src"/>'s texels into every place <paramref name="into"/> still
+    /// holds the sentinel, and says whether any remain.
+    /// </summary>
+    private static bool Fill(byte[] into, Tile tile, byte[] from, Tile src)
+    {
         int usable = WaterGrid - 2 * WaterBorder;
         float step = tile.Size / usable, srcStep = src.Size / usable;
+        bool complete = true;
 
         for (int z = 0; z < WaterGrid; z++)
         {
             float wz = tile.MinZ + (z - WaterBorder) * step;
-            int sz = Math.Clamp(
-                (int)MathF.Round((wz - src.MinZ) / srcStep) + WaterBorder, 0, WaterGrid - 1);
+            float v = (wz - src.MinZ) / srcStep + WaterBorder;
 
             for (int x = 0; x < WaterGrid; x++)
             {
-                float wx = tile.MinX + (x - WaterBorder) * step;
-                int sx = Math.Clamp(
-                    (int)MathF.Round((wx - src.MinX) / srcStep) + WaterBorder, 0, WaterGrid - 1);
+                int o = (z * WaterGrid + x) * WaterStride;
+                if ((into[o] | into[o + 1] << 8) >= 2) continue;
 
-                Array.Copy(from, (sz * WaterGrid + sx) * WaterStride,
-                           into, (z * WaterGrid + x) * WaterStride, WaterStride);
+                // Flagged dry on purpose; an ancestor does not get to overrule that.
+                if ((into[o + 6] & 0x80) != 0) continue;
+
+                float wx = tile.MinX + (x - WaterBorder) * step;
+                float u = (wx - src.MinX) / srcStep + WaterBorder;
+
+                if (!Sample(from, u, v, into.AsSpan(o, WaterStride))) complete = false;
             }
         }
 
-        return into;
+        return complete;
+    }
+
+    /// <summary>
+    /// Blends the four source texels around (<paramref name="u"/>, <paramref name="v"/>) into
+    /// <paramref name="texel"/>, or leaves it alone and returns false where none carry water.
+    /// </summary>
+    private static bool Sample(byte[] from, float u, float v, Span<byte> texel)
+    {
+        u = Math.Clamp(u, 0f, WaterGrid - 1.001f);
+        v = Math.Clamp(v, 0f, WaterGrid - 1.001f);
+
+        int x0 = (int)u, y0 = (int)v;
+        float fx = u - x0, fy = v - y0;
+
+        double weight = 0, height = 0, a = 0, b = 0;
+        int nearest = -1;
+        double nearestWeight = -1;
+
+        for (int c = 0; c < 4; c++)
+        {
+            int sx = x0 + (c & 1), sy = y0 + (c >> 1);
+            int f = (sy * WaterGrid + sx) * WaterStride;
+
+            int h = from[f] | from[f + 1] << 8;
+            if (h <= 1 || (from[f + 6] & 0x80) != 0) continue;
+
+            double k = ((c & 1) == 0 ? 1 - fx : fx) * ((c >> 1) == 0 ? 1 - fy : fy);
+            if (k <= 0) continue;
+
+            weight += k;
+            height += k * h;
+            a += k * (from[f + 2] | from[f + 3] << 8);
+            b += k * (from[f + 4] | from[f + 5] << 8);
+
+            if (k > nearestWeight) { nearestWeight = k; nearest = f; }
+        }
+
+        if (nearest < 0 || weight <= 0) return false;
+
+        Write(texel, 0, (int)Math.Round(height / weight));
+        Write(texel, 2, (int)Math.Round(a / weight));
+        Write(texel, 4, (int)Math.Round(b / weight));
+        Write(texel, 6, from[nearest + 6] | from[nearest + 7] << 8);
+        return true;
+
+        static void Write(Span<byte> into, int at, int value)
+        {
+            into[at] = (byte)value;
+            into[at + 1] = (byte)(value >> 8);
+        }
     }
 
     public Tile? HeightSourceAt(int level, float x, float z)
