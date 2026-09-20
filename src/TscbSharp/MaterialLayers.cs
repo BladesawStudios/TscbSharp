@@ -2,7 +2,12 @@ namespace TscbSharp;
 
 public static class MaterialLayers
 {
-    public const byte None = 120;
+    /// <summary>
+    /// What a texel holds where the archives name no material at all.
+    /// </summary>
+    public const byte NoMaterial = 255;
+
+    public const byte MaxLayer = 120;
 
     public static readonly byte[] IndexToLayer =
     [
@@ -19,7 +24,7 @@ public static class MaterialLayers
 
     private static byte[] BuildLayerToIndex()
     {
-        byte[] map = new byte[None + 1];
+        byte[] map = new byte[MaxLayer + 1];
         for (int i = 0; i < IndexToLayer.Length; i++) map[IndexToLayer[i]] = (byte)i;
         return map;
     }

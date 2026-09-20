@@ -30,6 +30,33 @@ public sealed class TerrainScene
     private (byte[] A, byte[] B, byte[] Blend)? _lastMate;
     private readonly Dictionary<string, ushort[]> _heights = [];
 
+    /// <summary>
+    /// Per-tile baked lighting, one byte a sample on the same grid as the heights.
+    /// </summary>
+    private readonly Dictionary<string, byte[]> _bakes = [];
+
+    /// <summary>
+    /// Per-tile water, as the game's own scene table describes it.
+    /// </summary>
+    private readonly Dictionary<string, byte[]> _water = [];
+
+    /// <summary>Each tile's whole water surface as one min and max, raw.</summary>
+    private readonly Dictionary<string, (ushort Min, ushort Max)> _waterRange = [];
+
+    /// <summary>Side of the water grid, and the border inside it.</summary>
+    public const int WaterGrid = 68;
+    public const int WaterBorder = 2;
+
+    private const int WaterStride = 8;
+    private const int WaterBytes = WaterGrid * WaterGrid * WaterStride;
+
+    /// <summary>
+    /// The bounding pyramid stored after the water grid.
+    /// </summary>
+    private const int WaterBounding = 4 * (32 * 32 + 16 * 16 + 8 * 8 + 4 * 4 + 2 * 2 + 1);
+
+    private const int WaterHeader = 0;
+
     private readonly HashSet<string> _opened = [];
     private readonly string _archiveDir;
 
@@ -239,6 +266,59 @@ public sealed class TerrainScene
         return true;
     }
 
+    /// <summary>Which level of the quadtree a tile belongs to, by its size.</summary>
+    public int LevelOf(Tile tile)
+    {
+        for (int l = 0; l < _levels.Count; l++)
+            if (_levels[l].TileSize == tile.Size) return l;
+        return _levels.Count - 1;
+    }
+
+    /// <summary>
+    /// The finest tile at or above <paramref name="level"/> that carries water.
+    /// </summary>
+    public Tile? WaterSourceAt(int level, float x, float z)
+    {
+        for (int l = Math.Min(level, _levels.Count - 1); l >= 0; l--)
+            if (TryTileAt(l, x, z, out Tile t) && WaterOf(t) is not null) return t;
+        return null;
+    }
+
+    /// <summary>
+    /// <paramref name="tile"/>'s own water grid, or an ancestor's resampled onto its footprint.
+    /// </summary>
+    public byte[]? WaterGridFor(Tile tile)
+    {
+        if (WaterOf(tile) is { } own) return own;
+
+        float cx = tile.MinX + tile.Size * 0.5f, cz = tile.MinZ + tile.Size * 0.5f;
+        if (WaterSourceAt(LevelOf(tile), cx, cz) is not Tile src) return null;
+        if (WaterOf(src) is not { } from) return null;
+
+        byte[] into = new byte[WaterBytes];
+        int usable = WaterGrid - 2 * WaterBorder;
+        float step = tile.Size / usable, srcStep = src.Size / usable;
+
+        for (int z = 0; z < WaterGrid; z++)
+        {
+            float wz = tile.MinZ + (z - WaterBorder) * step;
+            int sz = Math.Clamp(
+                (int)MathF.Round((wz - src.MinZ) / srcStep) + WaterBorder, 0, WaterGrid - 1);
+
+            for (int x = 0; x < WaterGrid; x++)
+            {
+                float wx = tile.MinX + (x - WaterBorder) * step;
+                int sx = Math.Clamp(
+                    (int)MathF.Round((wx - src.MinX) / srcStep) + WaterBorder, 0, WaterGrid - 1);
+
+                Array.Copy(from, (sz * WaterGrid + sx) * WaterStride,
+                           into, (z * WaterGrid + x) * WaterStride, WaterStride);
+            }
+        }
+
+        return into;
+    }
+
     public Tile? HeightSourceAt(int level, float x, float z)
     {
         for (int l = Math.Min(level, _levels.Count - 1); l >= 0; l--)
@@ -279,7 +359,7 @@ public sealed class TerrainScene
 
             int o = TexelOf(tile, x, z);
 
-            if (m.A[o] == MaterialLayers.None && m.B[o] == MaterialLayers.None) continue;
+            if (m.A[o] == MaterialLayers.NoMaterial && m.B[o] == MaterialLayers.NoMaterial) continue;
 
             return (m.A[o], m.B[o], m.Blend[o] / 255f);
         }
@@ -294,6 +374,36 @@ public sealed class TerrainScene
         string key = KeyOf(tile.Name);
         if (_materials.TryGetValue(key, out var m)) return m;
         return Load(tile.Name, "mate") && _materials.TryGetValue(key, out m) ? m : null;
+    }
+
+    /// <summary>This tile's baked lighting, or null where none ships for it.</summary>
+    public byte[]? BakeOf(Tile tile)
+    {
+        string key = KeyOf(tile.Name);
+        if (_bakes.TryGetValue(key, out byte[]? b)) return b;
+        return Load(tile.Name, "bake.extm") && _bakes.TryGetValue(key, out b) ? b : null;
+    }
+
+    /// <summary>
+    /// The lowest and highest the water gets on this tile, in world units, or null where the
+    /// tile ships none.
+    /// </summary>
+    public (float Min, float Max)? WaterRangeOf(Tile tile)
+    {
+        string key = KeyOf(tile.Name);
+        if (!_waterRange.TryGetValue(key, out var r))
+        {
+            if (!Load(tile.Name, "water.extm") || !_waterRange.TryGetValue(key, out r)) return null;
+        }
+        return (r.Min / 65535f * HeightRange, r.Max / 65535f * HeightRange);
+    }
+
+    /// <summary>This tile's water grid, or null where none ships for it.</summary>
+    public byte[]? WaterOf(Tile tile)
+    {
+        string key = KeyOf(tile.Name);
+        if (_water.TryGetValue(key, out byte[]? w)) return w;
+        return Load(tile.Name, "water.extm") && _water.TryGetValue(key, out w) ? w : null;
     }
 
     public ushort[]? HeightsOf(Tile tile)
@@ -365,6 +475,24 @@ public sealed class TerrainScene
             {
                 if (bytes.Length == Plane * 4) _materials[key] = DecodeMaterials(bytes);
             }
+            else if (kind == "bake.extm")
+            {
+                // One byte a sample, stored flat - no row deltas, unlike the materials.
+                if (bytes.Length == Plane) _bakes[key] = bytes;
+            }
+            else if (kind == "water.extm")
+            {
+                if (bytes.Length >= WaterHeader + WaterBytes + WaterBounding)
+                {
+                    _water[key] = bytes[WaterHeader..(WaterHeader + WaterBytes)];
+
+                    // The root of the trailing pyramid: this tile's whole surface in one node.
+                    int root = WaterHeader + WaterBytes + WaterBounding - 4;
+                    _waterRange[key] = (
+                        (ushort)(bytes[root + 2] | bytes[root + 3] << 8),
+                        (ushort)(bytes[root] | bytes[root + 1] << 8));
+                }
+            }
             else if (bytes.Length >= Plane * 2)
             {
                 _heights[key] = DecodeHeights(bytes);
@@ -372,7 +500,13 @@ public sealed class TerrainScene
         }
 
         string want = KeyOf(tileName);
-        return kind == "mate" ? _materials.ContainsKey(want) : _heights.ContainsKey(want);
+        return kind switch
+        {
+            "mate" => _materials.ContainsKey(want),
+            "bake.extm" => _bakes.ContainsKey(want),
+            "water.extm" => _water.ContainsKey(want),
+            _ => _heights.ContainsKey(want),
+        };
     }
 
     private static (byte[] A, byte[] B, byte[] Blend) DecodeMaterials(byte[] d)
@@ -386,8 +520,15 @@ public sealed class TerrainScene
                 ra = (ra + d[row + x]) & 0xFF;
                 rb = (rb + d[row + x + Plane]) & 0xFF;
                 rbl = (rbl + d[row + x + Plane * 2]) & 0xFF;
-                a[row + x] = MaterialLayers.IndexToLayer[Math.Min(ra, MaterialLayers.IndexToLayer.Length - 1)];
-                b[row + x] = MaterialLayers.IndexToLayer[Math.Min(rb, MaterialLayers.IndexToLayer.Length - 1)];
+                // Past the end of the table is ground the archives name no material for, and
+                // it is rare - a tenth of a per cent. Clamping it onto the last entry instead,
+                // which is what this did, merged it with material 125 and lost both.
+                a[row + x] = ra < MaterialLayers.IndexToLayer.Length
+                    ? MaterialLayers.IndexToLayer[ra]
+                    : MaterialLayers.NoMaterial;
+                b[row + x] = rb < MaterialLayers.IndexToLayer.Length
+                    ? MaterialLayers.IndexToLayer[rb]
+                    : MaterialLayers.NoMaterial;
                 bl[row + x] = (byte)rbl;
             }
         }
