@@ -71,22 +71,81 @@ public sealed class TerrainScene
 
     public List<float> MaterialMicro { get; private set; } = [];
 
-    private TerrainScene(string archiveDir) => _archiveDir = archiveDir;
+    /// <summary>
+    /// Maps a file the scene would read to the file to actually read - a mod's copy where it
+    /// has one. Paths go in as the stock romfs has them, so the scene never has to know a mod
+    /// exists.
+    /// </summary>
+    private readonly Func<string, string> _resolve;
+
+    private TerrainScene(string archiveDir, Func<string, string>? resolve)
+    {
+        _archiveDir = archiveDir;
+        _resolve = resolve ?? (p => p);
+    }
 
     private static string KeyOf(string tileName)
         => tileName.Length <= 9 ? tileName : tileName[^9..];
 
-    public static TerrainScene? Open(string terrainArcDir, string sceneName)
+    /// <summary>The name a tile's data goes by inside its archive, and in the caches here.</summary>
+    public static string EntryKey(string name)
     {
-        string tscb = Path.Combine(terrainArcDir, sceneName + ".tscb");
+        int dot = name.IndexOf('.');
+        return KeyOf(dot > 0 ? name[..dot] : name);
+    }
+
+    /// <summary>
+    /// The archive holding one kind of a tile's data - <c>mate</c>, <c>hght</c>,
+    /// <c>bake.extm</c> - as the stock romfs has it, or null for a name that is not a tile's.
+    /// Four sibling tiles share an archive.
+    /// </summary>
+    public string? ArchivePathOf(Tile tile, string kind)
+    {
+        if (tile.Name.Length < 9) return null;
+        ReadOnlySpan<char> id = KeyOf(tile.Name).AsSpan();
+        if (!int.TryParse(id[1..], System.Globalization.NumberStyles.HexNumber, null, out int index))
+            return null;
+
+        return Path.Combine(_archiveDir, $"{id[0]}{index & ~3:X8}.{kind}.ta.zs");
+    }
+
+    /// <summary>The file a path is read from, after the resolver has had its say.</summary>
+    public string Resolve(string path) => _resolve(path);
+
+    /// <summary>The tile of exactly this square, if the scene has one.</summary>
+    public Tile? TileAt(float minX, float minZ, float size)
+    {
+        for (int l = 0; l < _levels.Count; l++)
+        {
+            if (MathF.Abs(_levels[l].TileSize - size) > size * 1e-4f) continue;
+
+            float half = size * 0.5f;
+            if (TryTileAt(l, minX + half, minZ + half, out Tile t)
+                && MathF.Abs(t.MinX - minX) < half * 0.01f && MathF.Abs(t.MinZ - minZ) < half * 0.01f)
+                return t;
+        }
+        return null;
+    }
+
+    /// <param name="resolve">
+    /// Where each file is really read from; see <see cref="_resolve"/>. Null reads the paths
+    /// as given.
+    /// </param>
+    public static TerrainScene? Open(string terrainArcDir, string sceneName, Func<string, string>? resolve = null)
+    {
+        resolve ??= p => p;
+        string tscb = resolve(Path.Combine(terrainArcDir, sceneName + ".tscb"));
         if (!File.Exists(tscb)) return null;
 
-        TerrainScene scene = new(Path.Combine(terrainArcDir, sceneName));
+        TerrainScene scene = new(Path.Combine(terrainArcDir, sceneName), resolve);
         scene.ReadScene(tscb);
         return scene.LevelCount > 0 ? scene : null;
     }
 
     public static TerrainScene? TryLoad(string sceneName, params string?[] starts)
+        => TryLoad(sceneName, null, starts);
+
+    public static TerrainScene? TryLoad(string sceneName, Func<string, string>? resolve, params string?[] starts)
     {
         foreach (string? start in starts)
         {
@@ -99,7 +158,7 @@ public sealed class TerrainScene
             while (dir is not null)
             {
                 string arc = Path.Combine(dir.FullName, "TerrainArc");
-                if (Open(arc, sceneName) is { } scene) return scene;
+                if (Open(arc, sceneName, resolve) is { } scene) return scene;
                 dir = dir.Parent;
             }
         }
@@ -546,7 +605,7 @@ public sealed class TerrainScene
         if (!int.TryParse(id[1..], System.Globalization.NumberStyles.HexNumber,
                           null, out int index)) return false;
 
-        string archive = Path.Combine(_archiveDir, $"{level}{index & ~3:X8}.{kind}.ta.zs");
+        string archive = _resolve(Path.Combine(_archiveDir, $"{level}{index & ~3:X8}.{kind}.ta.zs"));
         if (!_opened.Add(archive)) return false;
         if (!File.Exists(archive)) return false;
 
