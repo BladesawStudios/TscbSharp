@@ -638,47 +638,47 @@ public sealed class TerrainScene
         {
             using Decompressor dec = new();
             raw = dec.Unwrap(File.ReadAllBytes(archive)).ToArray();
+
+            foreach (var (name, bytes) in Sarc.Read(raw))
+            {
+                int dot = name.IndexOf('.');
+                string key = KeyOf(dot > 0 ? name[..dot] : name);
+
+                if (kind == "mate")
+                {
+                    if (bytes.Length == Plane * 4) _materials[key] = DecodeMaterials(bytes);
+                }
+                else if (kind == "bake.extm")
+                {
+                    // One byte a sample, stored flat - no row deltas, unlike the materials.
+                    if (bytes.Length == Plane) _bakes[key] = bytes;
+                }
+                else if (kind == "water.extm")
+                {
+                    if (bytes.Length >= WaterHeader + WaterBytes + WaterBounding)
+                    {
+                        _water[key] = bytes[WaterHeader..(WaterHeader + WaterBytes)];
+
+                        // The root of the trailing pyramid: this tile's whole surface in one node.
+                        int root = WaterHeader + WaterBytes + WaterBounding - 4;
+                        _waterRange[key] = (
+                            (ushort)(bytes[root + 2] | bytes[root + 3] << 8),
+                            (ushort)(bytes[root] | bytes[root + 1] << 8));
+                    }
+                }
+                else if (kind == "grass.extm")
+                {
+                    if (bytes.Length == GrassBytes) _grass[key] = bytes;
+                }
+                else if (bytes.Length >= Plane * 2)
+                {
+                    _heights[key] = DecodeHeights(bytes);
+                }
+            }
         }
         catch
         {
             return false;
-        }
-
-        foreach (var (name, bytes) in Sarc.Read(raw))
-        {
-            int dot = name.IndexOf('.');
-            string key = KeyOf(dot > 0 ? name[..dot] : name);
-
-            if (kind == "mate")
-            {
-                if (bytes.Length == Plane * 4) _materials[key] = DecodeMaterials(bytes);
-            }
-            else if (kind == "bake.extm")
-            {
-                // One byte a sample, stored flat - no row deltas, unlike the materials.
-                if (bytes.Length == Plane) _bakes[key] = bytes;
-            }
-            else if (kind == "water.extm")
-            {
-                if (bytes.Length >= WaterHeader + WaterBytes + WaterBounding)
-                {
-                    _water[key] = bytes[WaterHeader..(WaterHeader + WaterBytes)];
-
-                    // The root of the trailing pyramid: this tile's whole surface in one node.
-                    int root = WaterHeader + WaterBytes + WaterBounding - 4;
-                    _waterRange[key] = (
-                        (ushort)(bytes[root + 2] | bytes[root + 3] << 8),
-                        (ushort)(bytes[root] | bytes[root + 1] << 8));
-                }
-            }
-            else if (kind == "grass.extm")
-            {
-                if (bytes.Length == GrassBytes) _grass[key] = bytes;
-            }
-            else if (bytes.Length >= Plane * 2)
-            {
-                _heights[key] = DecodeHeights(bytes);
-            }
         }
 
         string want = KeyOf(tileName);
