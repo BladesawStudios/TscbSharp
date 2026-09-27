@@ -57,6 +57,14 @@ public sealed class TerrainScene
 
     private const int WaterHeader = 0;
 
+    /// <summary>
+    /// Per-tile grass on the water grid, four bytes a cell: tint R, G, B, then height.
+    /// </summary>
+    private readonly Dictionary<string, byte[]> _grass = [];
+
+    public const int GrassStride = 4;
+    private const int GrassBytes = WaterGrid * WaterGrid * GrassStride;
+
     private readonly HashSet<string> _opened = [];
     private readonly string _archiveDir;
 
@@ -482,6 +490,22 @@ public sealed class TerrainScene
         return Load(tile.Name, "water.extm") && _water.TryGetValue(key, out w) ? w : null;
     }
 
+    /// <summary>This tile's grass grid, or null where none ships for it.</summary>
+    public byte[]? GrassOf(Tile tile)
+    {
+        string key = KeyOf(tile.Name);
+        if (_grass.TryGetValue(key, out byte[]? g)) return g;
+        return Load(tile.Name, "grass.extm") && _grass.TryGetValue(key, out g) ? g : null;
+    }
+
+    public (byte R, byte G, byte B, byte Height)? GrassAt(Tile tile, int x, int z)
+    {
+        if (GrassOf(tile) is not byte[] g) return null;
+        int o = ((Math.Clamp(z, -WaterBorder, WaterGrid - WaterBorder - 1) + WaterBorder) * WaterGrid
+               + Math.Clamp(x, -WaterBorder, WaterGrid - WaterBorder - 1) + WaterBorder) * GrassStride;
+        return (g[o], g[o + 1], g[o + 2], g[o + 3]);
+    }
+
     public ushort[]? HeightsOf(Tile tile)
     {
         string key = KeyOf(tile.Name);
@@ -569,6 +593,10 @@ public sealed class TerrainScene
                         (ushort)(bytes[root] | bytes[root + 1] << 8));
                 }
             }
+            else if (kind == "grass.extm")
+            {
+                if (bytes.Length == GrassBytes) _grass[key] = bytes;
+            }
             else if (bytes.Length >= Plane * 2)
             {
                 _heights[key] = DecodeHeights(bytes);
@@ -581,6 +609,7 @@ public sealed class TerrainScene
             "mate" => _materials.ContainsKey(want),
             "bake.extm" => _bakes.ContainsKey(want),
             "water.extm" => _water.ContainsKey(want),
+            "grass.extm" => _grass.ContainsKey(want),
             _ => _heights.ContainsKey(want),
         };
     }
