@@ -22,10 +22,15 @@ public static class MaterialLayers
 
     public static readonly byte[] LayerToIndex = BuildLayerToIndex();
 
+    /// <summary>
+    /// The first index naming each layer. Where several do, the later ones are the game's own
+    /// spares: its material table calls 31 and 76 unused and 29 and 30 not to be overwritten,
+    /// so writing a layer back has to land on the first.
+    /// </summary>
     private static byte[] BuildLayerToIndex()
     {
         byte[] map = new byte[MaxLayer + 1];
-        for (int i = 0; i < IndexToLayer.Length; i++) map[IndexToLayer[i]] = (byte)i;
+        for (int i = IndexToLayer.Length - 1; i >= 0; i--) map[IndexToLayer[i]] = (byte)i;
         return map;
     }
 }

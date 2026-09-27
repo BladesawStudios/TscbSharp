@@ -32,7 +32,7 @@ public static class MateArchive
         return dec.Unwrap(file).ToArray();
     }
 
-    public static byte[] Compress(byte[] sarc, int level = 16)
+    public static byte[] Compress(byte[] sarc, int level = 6)
     {
         using Compressor c = new(level);
         return c.Wrap(sarc).ToArray();
@@ -123,6 +123,33 @@ public static class MateArchive
         }
 
         return changed;
+    }
+
+    /// <summary>
+    /// One entry as a grid of layer A, layer B, blend and a spare byte per texel - the layers
+    /// the texture array is addressed by, not the indices stored.
+    /// </summary>
+    public static byte[] Decode(ReadOnlySpan<byte> entry)
+    {
+        if (entry.Length != EntrySize) throw new ArgumentException("Not a material entry.", nameof(entry));
+
+        byte[] grid = new byte[Plane * 4];
+        for (int y = 0; y < Grid; y++)
+        {
+            int row = y * Grid, a = 0, b = 0, bl = 0;
+            for (int x = 0; x < Grid; x++)
+            {
+                a = (a + entry[row + x]) & 0xFF;
+                b = (b + entry[row + x + Plane]) & 0xFF;
+                bl = (bl + entry[row + x + Plane * 2]) & 0xFF;
+
+                int o = (row + x) * 4;
+                grid[o] = LayerOf((byte)a);
+                grid[o + 1] = LayerOf((byte)b);
+                grid[o + 2] = (byte)bl;
+            }
+        }
+        return grid;
     }
 
     private static byte LayerOf(byte index) =>
