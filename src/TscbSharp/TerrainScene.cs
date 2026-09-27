@@ -79,22 +79,81 @@ public sealed class TerrainScene
 
     public List<float> MaterialMicro { get; private set; } = [];
 
-    private TerrainScene(string archiveDir) => _archiveDir = archiveDir;
+    /// <summary>
+    /// Maps a file the scene would read to the file to actually read - a mod's copy where it
+    /// has one. Paths go in as the stock romfs has them, so the scene never has to know a mod
+    /// exists.
+    /// </summary>
+    private readonly Func<string, string> _resolve;
+
+    private TerrainScene(string archiveDir, Func<string, string>? resolve)
+    {
+        _archiveDir = archiveDir;
+        _resolve = resolve ?? (p => p);
+    }
 
     private static string KeyOf(string tileName)
         => tileName.Length <= 9 ? tileName : tileName[^9..];
 
-    public static TerrainScene? Open(string terrainArcDir, string sceneName)
+    /// <summary>The name a tile's data goes by inside its archive, and in the caches here.</summary>
+    public static string EntryKey(string name)
     {
-        string tscb = Path.Combine(terrainArcDir, sceneName + ".tscb");
+        int dot = name.IndexOf('.');
+        return KeyOf(dot > 0 ? name[..dot] : name);
+    }
+
+    /// <summary>
+    /// The archive holding one kind of a tile's data - <c>mate</c>, <c>hght</c>,
+    /// <c>bake.extm</c> - as the stock romfs has it, or null for a name that is not a tile's.
+    /// Four sibling tiles share an archive.
+    /// </summary>
+    public string? ArchivePathOf(Tile tile, string kind)
+    {
+        if (tile.Name.Length < 9) return null;
+        ReadOnlySpan<char> id = KeyOf(tile.Name).AsSpan();
+        if (!int.TryParse(id[1..], System.Globalization.NumberStyles.HexNumber, null, out int index))
+            return null;
+
+        return Path.Combine(_archiveDir, $"{id[0]}{index & ~3:X8}.{kind}.ta.zs");
+    }
+
+    /// <summary>The file a path is read from, after the resolver has had its say.</summary>
+    public string Resolve(string path) => _resolve(path);
+
+    /// <summary>The tile of exactly this square, if the scene has one.</summary>
+    public Tile? TileAt(float minX, float minZ, float size)
+    {
+        for (int l = 0; l < _levels.Count; l++)
+        {
+            if (MathF.Abs(_levels[l].TileSize - size) > size * 1e-4f) continue;
+
+            float half = size * 0.5f;
+            if (TryTileAt(l, minX + half, minZ + half, out Tile t)
+                && MathF.Abs(t.MinX - minX) < half * 0.01f && MathF.Abs(t.MinZ - minZ) < half * 0.01f)
+                return t;
+        }
+        return null;
+    }
+
+    /// <param name="resolve">
+    /// Where each file is really read from; see <see cref="_resolve"/>. Null reads the paths
+    /// as given.
+    /// </param>
+    public static TerrainScene? Open(string terrainArcDir, string sceneName, Func<string, string>? resolve = null)
+    {
+        resolve ??= p => p;
+        string tscb = resolve(Path.Combine(terrainArcDir, sceneName + ".tscb"));
         if (!File.Exists(tscb)) return null;
 
-        TerrainScene scene = new(Path.Combine(terrainArcDir, sceneName));
+        TerrainScene scene = new(Path.Combine(terrainArcDir, sceneName), resolve);
         scene.ReadScene(tscb);
         return scene.LevelCount > 0 ? scene : null;
     }
 
     public static TerrainScene? TryLoad(string sceneName, params string?[] starts)
+        => TryLoad(sceneName, null, starts);
+
+    public static TerrainScene? TryLoad(string sceneName, Func<string, string>? resolve, params string?[] starts)
     {
         foreach (string? start in starts)
         {
@@ -107,7 +166,7 @@ public sealed class TerrainScene
             while (dir is not null)
             {
                 string arc = Path.Combine(dir.FullName, "TerrainArc");
-                if (Open(arc, sceneName) is { } scene) return scene;
+                if (Open(arc, sceneName, resolve) is { } scene) return scene;
                 dir = dir.Parent;
             }
         }
@@ -300,35 +359,56 @@ public sealed class TerrainScene
     public byte[]? WaterGridFor(Tile tile) => WaterGridFor(tile, null);
 
     /// <param name="heights">Unused; kept so callers that have them need not drop them.</param>
+    /// <remarks>
+    /// Only where the tile says nothing itself - no water file, or one without a single wet
+    /// texel - and then from the nearest ancestor that does say something, taken whole: its dry
+    /// texels are as much an answer as its wet ones.
+    ///
+    /// It used to be filled texel by texel, climbing past any ancestor that was dry at that
+    /// point to the next one up, and blending in whichever of the four source texels around a
+    /// point were wet. Between them those spread every lake's surface outward by a texel of
+    /// whatever level supplied it - 250 m at the root - so a hillside 16 m above anything any
+    /// level calls water came out under a sheet at 349.6 m, and tile-shaped pools of plain
+    /// water stood all over the Gerudo dunes. A texel is wet now only where the source texel
+    /// nearest it is.
+    /// </remarks>
     public byte[]? WaterGridFor(Tile tile, ushort[]? heights)
     {
         byte[]? own = WaterOf(tile);
-        int start = LevelOf(tile) - (own is null ? 0 : 1);
+        if (own is not null && AnyWet(own)) return own;
 
-        byte[]? into = null;
         float cx = tile.MinX + tile.Size * 0.5f, cz = tile.MinZ + tile.Size * 0.5f;
 
-        for (int l = Math.Min(start, _levels.Count - 1); l >= 0; l--)
+        for (int l = Math.Min(LevelOf(tile) - 1, _levels.Count - 1); l >= 0; l--)
         {
             if (!TryTileAt(l, cx, cz, out Tile src)) continue;
-            if (WaterOf(src) is not { } from) continue;
+            if (WaterOf(src) is not { } from || !AnyWet(from)) continue;
 
-            into ??= own is null ? new byte[WaterBytes] : (byte[])own.Clone();
-            if (Fill(into, tile, from, src)) break;
+            byte[] into = new byte[WaterBytes];
+            Fill(into, tile, from, src);
+            return into;
         }
 
-        return into ?? own;
+        return own;
     }
 
-    /// <summary>
-    /// Copies <paramref name="src"/>'s texels into every place <paramref name="into"/> still
-    /// holds the sentinel, and says whether any remain.
-    /// </summary>
-    private static bool Fill(byte[] into, Tile tile, byte[] from, Tile src)
+    /// <summary>Whether a grid holds water anywhere inside its border.</summary>
+    private static bool AnyWet(byte[] water)
+    {
+        for (int z = WaterBorder; z < WaterGrid - WaterBorder; z++)
+            for (int x = WaterBorder; x < WaterGrid - WaterBorder; x++)
+                if (Wet(water, (z * WaterGrid + x) * WaterStride)) return true;
+        return false;
+    }
+
+    private static bool Wet(byte[] water, int o)
+        => (water[o] | water[o + 1] << 8) >= 2 && (water[o + 6] & 0x80) == 0;
+
+    /// <summary>Resamples <paramref name="src"/>'s grid onto <paramref name="tile"/>'s footprint.</summary>
+    private static void Fill(byte[] into, Tile tile, byte[] from, Tile src)
     {
         int usable = WaterGrid - 2 * WaterBorder;
         float step = tile.Size / usable, srcStep = src.Size / usable;
-        bool complete = true;
 
         for (int z = 0; z < WaterGrid; z++)
         {
@@ -337,27 +417,20 @@ public sealed class TerrainScene
 
             for (int x = 0; x < WaterGrid; x++)
             {
-                int o = (z * WaterGrid + x) * WaterStride;
-                if ((into[o] | into[o + 1] << 8) >= 2) continue;
-
-                // Flagged dry on purpose; an ancestor does not get to overrule that.
-                if ((into[o + 6] & 0x80) != 0) continue;
-
                 float wx = tile.MinX + (x - WaterBorder) * step;
                 float u = (wx - src.MinX) / srcStep + WaterBorder;
 
-                if (!Sample(from, u, v, into.AsSpan(o, WaterStride))) complete = false;
+                Sample(from, u, v, into.AsSpan((z * WaterGrid + x) * WaterStride, WaterStride));
             }
         }
-
-        return complete;
     }
 
     /// <summary>
-    /// Blends the four source texels around (<paramref name="u"/>, <paramref name="v"/>) into
-    /// <paramref name="texel"/>, or leaves it alone and returns false where none carry water.
+    /// The source texel nearest (<paramref name="u"/>, <paramref name="v"/>) decides whether
+    /// there is water; where there is, its height and normal are blended across whichever of
+    /// the four around it are wet too, so neighbouring tiles agree along their seam.
     /// </summary>
-    private static bool Sample(byte[] from, float u, float v, Span<byte> texel)
+    private static void Sample(byte[] from, float u, float v, Span<byte> texel)
     {
         u = Math.Clamp(u, 0f, WaterGrid - 1.001f);
         v = Math.Clamp(v, 0f, WaterGrid - 1.001f);
@@ -365,36 +438,41 @@ public sealed class TerrainScene
         int x0 = (int)u, y0 = (int)v;
         float fx = u - x0, fy = v - y0;
 
+        int nearest = ((y0 + (fy < 0.5f ? 0 : 1)) * WaterGrid + x0 + (fx < 0.5f ? 0 : 1)) * WaterStride;
+        if (!Wet(from, nearest))
+        {
+            from.AsSpan(nearest, WaterStride).CopyTo(texel);
+            return;
+        }
+
         double weight = 0, height = 0, a = 0, b = 0;
-        int nearest = -1;
-        double nearestWeight = -1;
 
         for (int c = 0; c < 4; c++)
         {
             int sx = x0 + (c & 1), sy = y0 + (c >> 1);
             int f = (sy * WaterGrid + sx) * WaterStride;
-
-            int h = from[f] | from[f + 1] << 8;
-            if (h <= 1 || (from[f + 6] & 0x80) != 0) continue;
+            if (!Wet(from, f)) continue;
 
             double k = ((c & 1) == 0 ? 1 - fx : fx) * ((c >> 1) == 0 ? 1 - fy : fy);
             if (k <= 0) continue;
 
             weight += k;
-            height += k * h;
+            height += k * (from[f] | from[f + 1] << 8);
             a += k * (from[f + 2] | from[f + 3] << 8);
             b += k * (from[f + 4] | from[f + 5] << 8);
-
-            if (k > nearestWeight) { nearestWeight = k; nearest = f; }
         }
 
-        if (nearest < 0 || weight <= 0) return false;
+        // The nearest is wet, so it always contributes; this is only for rounding.
+        if (weight <= 0)
+        {
+            from.AsSpan(nearest, WaterStride).CopyTo(texel);
+            return;
+        }
 
         Write(texel, 0, (int)Math.Round(height / weight));
         Write(texel, 2, (int)Math.Round(a / weight));
         Write(texel, 4, (int)Math.Round(b / weight));
         Write(texel, 6, from[nearest + 6] | from[nearest + 7] << 8);
-        return true;
 
         static void Write(Span<byte> into, int at, int value)
         {
@@ -551,7 +629,7 @@ public sealed class TerrainScene
         if (!int.TryParse(id[1..], System.Globalization.NumberStyles.HexNumber,
                           null, out int index)) return false;
 
-        string archive = Path.Combine(_archiveDir, $"{level}{index & ~3:X8}.{kind}.ta.zs");
+        string archive = _resolve(Path.Combine(_archiveDir, $"{level}{index & ~3:X8}.{kind}.ta.zs"));
         if (!_opened.Add(archive)) return false;
         if (!File.Exists(archive)) return false;
 
