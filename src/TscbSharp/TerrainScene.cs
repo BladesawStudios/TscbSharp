@@ -60,6 +60,11 @@ public sealed class TerrainScene
     /// <summary>
     /// Per-tile grass on the water grid, four bytes a cell: tint R, G, B, then height.
     /// </summary>
+    /// <remarks>
+    /// The height is the tall, cuttable grass: 255 across a meadow and 0 on bare ground, with
+    /// the steps between along its edges. Ground that carries none still stores the default
+    /// tint, <c>18 34 08</c>, and a height of 0 or 1.
+    /// </remarks>
     private readonly Dictionary<string, byte[]> _grass = [];
 
     public const int GrassStride = 4;
@@ -574,6 +579,51 @@ public sealed class TerrainScene
         string key = KeyOf(tile.Name);
         if (_grass.TryGetValue(key, out byte[]? g)) return g;
         return Load(tile.Name, "grass.extm") && _grass.TryGetValue(key, out g) ? g : null;
+    }
+
+    /// <summary>
+    /// <paramref name="tile"/>'s grass grid, or where it ships none, the nearest ancestor's
+    /// resampled onto its footprint - the same fallback <see cref="WaterGridFor(Tile)"/> makes,
+    /// and needed for the same reason: 1693 of MainField's 2978 tiles carry grass, so a load's
+    /// finer tiles mostly have to borrow it from a coarser one.
+    /// </summary>
+    /// <remarks>
+    /// Nearest texel rather than blended. The height byte is how far the tall grass has grown
+    /// and an edge between grass and none is meant to be an edge; blending would stand a fringe
+    /// of short grass along every one.
+    /// </remarks>
+    public byte[]? GrassGridFor(Tile tile)
+    {
+        if (GrassOf(tile) is { } own) return own;
+
+        float cx = tile.MinX + tile.Size * 0.5f, cz = tile.MinZ + tile.Size * 0.5f;
+
+        for (int l = Math.Min(LevelOf(tile) - 1, _levels.Count - 1); l >= 0; l--)
+        {
+            if (!TryTileAt(l, cx, cz, out Tile src) || GrassOf(src) is not { } from) continue;
+
+            int usable = WaterGrid - 2 * WaterBorder;
+            float step = tile.Size / usable, srcStep = src.Size / usable;
+            byte[] into = new byte[GrassBytes];
+
+            for (int z = 0; z < WaterGrid; z++)
+            {
+                float v = (tile.MinZ + (z - WaterBorder + 0.5f) * step - src.MinZ) / srcStep + WaterBorder;
+                int sz = Math.Clamp((int)MathF.Floor(v), 0, WaterGrid - 1);
+
+                for (int x = 0; x < WaterGrid; x++)
+                {
+                    float u = (tile.MinX + (x - WaterBorder + 0.5f) * step - src.MinX) / srcStep + WaterBorder;
+                    int sx = Math.Clamp((int)MathF.Floor(u), 0, WaterGrid - 1);
+
+                    Array.Copy(from, (sz * WaterGrid + sx) * GrassStride,
+                               into, (z * WaterGrid + x) * GrassStride, GrassStride);
+                }
+            }
+            return into;
+        }
+
+        return null;
     }
 
     public (byte R, byte G, byte B, byte Height)? GrassAt(Tile tile, int x, int z)
