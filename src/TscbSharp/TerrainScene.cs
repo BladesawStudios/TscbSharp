@@ -588,9 +588,9 @@ public sealed class TerrainScene
     /// finer tiles mostly have to borrow it from a coarser one.
     /// </summary>
     /// <remarks>
-    /// Nearest texel rather than blended. The height byte is how far the tall grass has grown
-    /// and an edge between grass and none is meant to be an edge; blending would stand a fringe
-    /// of short grass along every one.
+    /// Each cell is the ancestor read between its four nearest cell centres, which is what the
+    /// game's linear filter reads from the ancestor's texture; the nearest cell would stand the
+    /// ancestor's coarser cells up as blocks.
     /// </remarks>
     public byte[]? GrassGridFor(Tile tile)
     {
@@ -608,16 +608,24 @@ public sealed class TerrainScene
 
             for (int z = 0; z < WaterGrid; z++)
             {
-                float v = (tile.MinZ + (z - WaterBorder + 0.5f) * step - src.MinZ) / srcStep + WaterBorder;
-                int sz = Math.Clamp((int)MathF.Floor(v), 0, WaterGrid - 1);
+                // Measured from the centre of the ancestor's first cell, so a whole number is a cell centre.
+                float v = (tile.MinZ + (z - WaterBorder + 0.5f) * step - src.MinZ) / srcStep + WaterBorder - 0.5f;
+                int z0 = (int)MathF.Floor(v);
+                float fz = v - z0;
 
                 for (int x = 0; x < WaterGrid; x++)
                 {
-                    float u = (tile.MinX + (x - WaterBorder + 0.5f) * step - src.MinX) / srcStep + WaterBorder;
-                    int sx = Math.Clamp((int)MathF.Floor(u), 0, WaterGrid - 1);
+                    float u = (tile.MinX + (x - WaterBorder + 0.5f) * step - src.MinX) / srcStep + WaterBorder - 0.5f;
+                    int x0 = (int)MathF.Floor(u);
+                    float fx = u - x0;
 
-                    Array.Copy(from, (sz * WaterGrid + sx) * GrassStride,
-                               into, (z * WaterGrid + x) * GrassStride, GrassStride);
+                    int o = (z * WaterGrid + x) * GrassStride;
+                    for (int c = 0; c < GrassStride; c++)
+                    {
+                        float near = GrassCell(from, x0, z0, c) * (1f - fx) + GrassCell(from, x0 + 1, z0, c) * fx;
+                        float far = GrassCell(from, x0, z0 + 1, c) * (1f - fx) + GrassCell(from, x0 + 1, z0 + 1, c) * fx;
+                        into[o + c] = (byte)(near * (1f - fz) + far * fz + 0.5f);
+                    }
                 }
             }
             return into;
@@ -625,6 +633,10 @@ public sealed class TerrainScene
 
         return null;
     }
+
+    // One byte of a grass grid's cell, the cell held to the grid.
+    private static float GrassCell(byte[] grid, int x, int z, int channel) =>
+        grid[(Math.Clamp(z, 0, WaterGrid - 1) * WaterGrid + Math.Clamp(x, 0, WaterGrid - 1)) * GrassStride + channel];
 
     public (byte R, byte G, byte B, byte Height)? GrassAt(Tile tile, int x, int z)
     {
