@@ -38,8 +38,11 @@ public static class MateArchive
         return c.Wrap(sarc).ToArray();
     }
 
-    /// <summary>Where each tile's entry starts in a decompressed archive, by its key.</summary>
-    public static Dictionary<string, int> Entries(byte[] sarc)
+    /// <summary>
+    /// Where each tile's entry starts in a decompressed archive, by its key: every entry of
+    /// <paramref name="entrySize"/> bytes, a material entry's unless another kind's is given.
+    /// </summary>
+    public static Dictionary<string, int> Entries(byte[] sarc, int entrySize = EntrySize)
     {
         Dictionary<string, int> found = [];
         if (sarc.Length < 0x20 || sarc[0] != 'S' || sarc[1] != 'A' || sarc[2] != 'R' || sarc[3] != 'C')
@@ -60,7 +63,7 @@ public static class MateArchive
             int nameOffset = names + (U32(n + 4) & 0xFFFFFF) * 4;
             int start = dataOffset + U32(n + 8);
             int end = dataOffset + U32(n + 12);
-            if (end - start != EntrySize || end > sarc.Length || nameOffset >= sarc.Length) continue;
+            if (end - start != entrySize || end > sarc.Length || nameOffset >= sarc.Length) continue;
 
             int z = Array.IndexOf(sarc, (byte)0, nameOffset);
             if (z < 0) continue;
